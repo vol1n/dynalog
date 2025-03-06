@@ -1,0 +1,6 @@
+{:paths ["src" "test"]
+ :deps {com.cognitect.aws/endpoints {:mvn/version "1.1.12.504"}
+        com.cognitect.aws/dynamodb {:mvn/version "848.2.1413.0"}
+        com.grzm/awyeah-api {:git/url "https://github.com/grzm/awyeah-api"
+                             :git/sha "e5513349a2fd8a980a62bbe0d45a0d55bfcea141"
+                             :git/tag "v0.8.84"}}}

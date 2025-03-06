@@ -1,8 +1,8 @@
-(ns vol1n.dynomic.transact
+(ns vol1n.dynalog.transact
   (:require [com.grzm.awyeah.client.api :as aws]
             [clojure.core.async :as async]
-            [vol1n.dynomic.schema :as schema]
-            [vol1n.dynomic.utils :as utils]))
+            [vol1n.dynalog.schema :as schema]
+            [vol1n.dynalog.utils :as utils]))
 
 (defn- generate-id []
   (str (random-uuid)))
@@ -169,7 +169,6 @@
       {:vol1n.dynomic/error true :vol1n.dynomic.error/aws true :vol1n.dynomic.error/message (str "The following facts are not unique: " (vec (keep-indexed #(when (false? %2) (nth facts %1)) valid-schema-facts)))})))
 
 (defn dissoc-in [m [k & ks]]
-  (println "dissoc-in" m k ks)
   (if ks
     (update m k #(let [res (dissoc-in % ks)]
                    (if (empty? res) nil res)))
@@ -177,11 +176,6 @@
 
 (defn remove-facts-from-cache! [facts] 
   (swap! utils/cache #(reduce (fn [acc fact]
-                                (println "fact" fact)
-                                (println "removing attr-val" (str (get-in fact [:attribute :S]) "#" (get-in fact [:value :S])))
-                                (println "removing attribute" (get-in fact [:attribute :S]))
-                                (println "removing entity-id-attribute" (str (get-in fact [:entity-id :S]) "#" (get-in fact [:attribute :S])))
-                                (println "removing entity-id" (get-in fact [:entity-id :S]))
                                 (if (map? fact)
                                   (-> acc
                                       (dissoc-in [:attr-value (str (get-in fact [:attribute :S]) "#" (get-in fact [:value :S]))])
@@ -224,12 +218,7 @@
                                                 :UpdateExpression "SET #ret = :tx"
                                                 :ExpressionAttributeNames {"#ret" "retracted"}
                                                 :ExpressionAttributeValues {":tx" {:S (str tx-id)}}}}]
-                         (println "payload" payload)
-                         (println %)
                          (aws/invoke (:dynamo conn) payload)) (:Items facts))]
-    (println "facts" facts)
-    (println "updates" updates)
-    (remove-facts-from-cache! facts)
     updates))
 
 (defn retract-attribute-value! [r tx-id conn]
@@ -248,12 +237,7 @@
                                                 :UpdateExpression "SET #ret = :tx"
                                                 :ExpressionAttributeNames {"#ret" "retracted"}
                                                 :ExpressionAttributeValues {":tx" {:S (str tx-id)}}}}] 
-                         (println "fax" facts)
-                         (println "payload" payload)
-                         (println %)
                          (aws/invoke (:dynamo conn) payload)) (:Items facts))] 
-        (println "facts" facts)
-    (println "updates" updates "setadpu")
     (remove-facts-from-cache! facts)
     updates))
 

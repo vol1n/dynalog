@@ -1,6 +1,6 @@
-(ns vol1n.dynomic.utils
+(ns vol1n.dynalog.utils
   (:require [com.grzm.awyeah.client.api :as aws]
-            [vol1n.dynomic.schema :as schema]))
+            [vol1n.dynalog.schema :as schema]))
 
 (def cache
   (atom {:attr-value {} 
@@ -29,16 +29,12 @@
         :db.type/ref value))))
 
 (defn- format-response [dynamo-response]
-  (println "format-response")
-  (println ":Items " (:Items dynamo-response))
   (keep (fn [item]
-          (println "item " item)
           (let [entity-id (get-in item [:entity-id :S])
                 attribute (get-in item [:attribute :S])
                 value (get-in item [:value :S])
                 tx-id (get-in item [:tx-id :S])
                 retraction-tx (get-in item [:retracted :S])]
-            (println "retraction-tx " retraction-tx)
             (if (nil? retraction-tx)
               {:attribute (keywordize-leading-colon attribute)
                :entity-id entity-id
@@ -67,7 +63,6 @@
     (format-response dynamo-response)))
 
 (defn fetch-by-attribute-value [dynamo table-name attribute value] 
-  (println "fetch-by-attribute-value attribute " attribute "value " value)
   (let [dynamo-response (aws/invoke dynamo
                                     {:op :Query
                                      :request {:TableName table-name
@@ -76,8 +71,6 @@
                                                :ExpressionAttributeNames {"#attr" "attribute-value"}
                                                :ExpressionAttributeValues {":attrval" {:S (str attribute "#" value)}}}})
         formatted (format-response dynamo-response)]
-  (println "formatted " formatted)
-    (println "dynamo-response " dynamo-response)
     formatted))
 
 (defn fetch-by-entity-id-attribute [dynamo table-name entity-id attribute]

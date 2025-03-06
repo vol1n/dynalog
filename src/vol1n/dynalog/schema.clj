@@ -1,4 +1,4 @@
-(ns vol1n.dynomic.schema
+(ns vol1n.dynalog.schema
     (:require [com.grzm.awyeah.client.api :as aws]))
 
 (def schema-cache (atom {}))

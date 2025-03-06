@@ -1,8 +1,8 @@
-(ns vol1n.dynomic.core
+(ns vol1n.dynalog.core
   (:require [com.grzm.awyeah.client.api :as aws]
             [clojure.stacktrace]
             [clojure.core.async :as async]
-            [vol1n.dynomic.schema :as schema]))
+            [vol1n.dynalog.schema :as schema]))
 
 (defn client [{:keys [aws-region]}]
   {:dynamo (aws/client {:api :dynamodb :region aws-region})})

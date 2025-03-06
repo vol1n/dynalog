@@ -1,6 +1,7 @@
-(ns vol1n.dynomic.query
-   (:require [vol1n.dynomic.utils :as utils]
-             [clojure.set :as set]))
+(ns vol1n.dynalog.query
+   (:require [vol1n.dynalog.utils :as utils]
+             [clojure.set :as set]
+             [vol1n.dynalog.pull :as p]))
 
 (defn parse-query [query]
   (let [sections (partition-by keyword? query)
@@ -38,14 +39,10 @@
     result))
 
 (defn get-by-attrval [attribute value conn]
-  (println "get-by-attrval attribute " attribute "value " value)
   (let [cache-hit (get-in @utils/cache [:attr-value (str attribute "#" value)]) 
         result (if (nil? cache-hit)
                  (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) attribute value)
                  cache-hit)] 
-    (println "cache lookup" (str attribute "#" value))
-    (println "cache-hit" cache-hit)
-    (println "result" result)
     (swap! utils/cache #(assoc-in % [:attr-value (str attribute "#" value)] result))
     result))
  
@@ -61,7 +58,6 @@
     parsed)) 
 
 (defn lookup-eids [attribute values conn] 
-  (println "lookup-eids attribute " attribute "values " values)
   (let [result (if (nil? values)
                  (get-by-attribute attribute conn)
                  (apply concat (pmap #(get-by-attrval attribute % conn) (cond 
@@ -70,8 +66,6 @@
                                                                           (map? values) (set (mapcat identity (vals values)))
                                                                           :else [values]))))
         eids (reduce (fn [acc item] (conj acc (:entity-id item))) #{} result)] 
-    (println "resultf result")
-    (println "eids" eids)
     eids))
 
 (defn inverse-map [m]
@@ -116,8 +110,6 @@
          q queue]
     (let [resolved ((get resolvers (first q)) b)
           new-bindings (assoc b (first q) resolved)] 
-      (println "resolved" resolved)
-      (println "new-bindings"  new-bindings)
       (cond 
         (and (= new-bindings b) (seq (rest q))) (recur new-bindings (rest q))
         (= new-bindings b) new-bindings
@@ -138,10 +130,6 @@
           new-set (lookup-eids attribute constrained-by-val conn) ;; constrained-by resolves to a map or set or nothing
           old (if current-resolver (current-resolver bindings) nil)
           merged (merge-constraints new-set old)]
-      (println "constrain-by-val" constrained-by-val)
-      (println "new-set" new-set)
-      (println "old" old)
-      (println "merged" merged)
       merged)))
 
 (defn to-named-tuples [var values]
@@ -222,13 +210,20 @@
           predicates))
 
 (defn into-vectors 
-  ([result-bindings var-order]
-   (into-vectors result-bindings var-order []))
-  ([result-bindings var-order predicates]
+  ([conn result-bindings var-order]
+   (into-vectors conn result-bindings var-order []))
+  ([conn result-bindings var-order predicates]
    (let [sets (mapv (fn [[k v]] (to-named-tuples k v)) result-bindings) ;; vector of sets of named tuples
          unified (join-no-extra-cartesians sets)
          filtered (apply-predicates unified predicates)
-         result (mapv #(reduce (fn [acc var] (conj acc (get % var))) [] var-order) filtered)] ;; set of named tuples
+         result (vec (doall (pmap #(reduce (fn [acc var] 
+                                             (println "i-v reduce var" var)
+                                             (println "%" %)
+                                             (println "second var" (when (coll? var) (second var)))
+                                             (cond 
+                                               (symbol? var) (conj acc (get % var))
+                                               (and (coll? var) (= (first var) 'pull)) 
+                                               (conj acc (p/pull conn (last var) (get % (second var)))))) [] var-order) filtered)))]
      result)))
 
 (defn build-dependency-graph [clauses]
@@ -271,6 +266,7 @@
 (defn q [body & inputs]
   (let [parsed (parse-query body)
         input-map (zipmap (:in parsed) inputs)
+        conn ('$ input-map)
         resolvers (build-resolvers input-map (:where parsed))
         fn-clauses (filter (fn [clause] (= (count clause) 2)) (:where parsed))
         sorted-fn-clause (sort-fn-clauses fn-clauses) 
@@ -285,9 +281,4 @@
                                 (conj acc word)
                                 acc)) [] (mapcat identity sorted-clauses))
         resolved (resolve-all {} resolvers sorted-vars)]
-    (println "parsed" parsed)
-    (println "resolvers" resolvers)
-    (println "sorted-clauses" sorted-clauses)
-    (println "sorted-vars" sorted-vars)
-    (println "resolved" resolved)
-    (into-vectors resolved (:find parsed) predicate-clauses)))
+    (into-vectors conn resolved (:find parsed) predicate-clauses)))

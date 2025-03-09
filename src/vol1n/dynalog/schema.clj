@@ -43,21 +43,32 @@
 (defn update-schema! [client table-name]
   (reset! schema-cache (get-schema client table-name)))
 
-(defn- valid-value? [value constraints]
-  (((:db/valueType constraints) value-type-predicates) value))
+(defn- valid-value? [value constraints] 
+  (if-let [value-type (:db/valueType constraints)]
+    ((value-type value-type-predicates) value)
+    false))
 
 (defn- valid-attribute? [attr value] 
+  (println "validating attribute" attr "with value" value)
   (let [attributes @schema-cache
         is-valid? (cond 
                     (contains? reserved-attributes attr) ((attr reserved-attributes) value)
                     (contains? attributes attr) (valid-value? value (attr attributes))
                     :else false)]
+    (println "attributes" attributes)
+    (println "is-valid?" is-valid?)
     is-valid?))
 
 (defn valid-entity? [entity] 
-  (if (map? entity)
-    (every? (fn [[k v]] (valid-attribute? k v)) entity)
-    true))
+  (let [is-valid (if (map? entity)
+                 (every? (fn [[k v]] (valid-attribute? k v)) entity)
+                 true)]
+  (println "entity" entity "is valid?" is-valid)
+  is-valid))
+  
 
 (defn validate [tx-data]
-  (remove #(valid-entity? %) tx-data))
+  (println "validating" tx-data)
+  (let [result (remove #(valid-entity? %) tx-data)]
+    (println "invalid" result)
+    result))

@@ -29,6 +29,7 @@
         :db.type/ref value))))
 
 (defn- format-response [dynamo-response]
+  (println "format-response" dynamo-response)
   (keep (fn [item]
           (let [entity-id (get-in item [:entity-id :S])
                 attribute (get-in item [:attribute :S])

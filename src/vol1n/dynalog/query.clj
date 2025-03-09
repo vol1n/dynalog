@@ -217,9 +217,6 @@
          unified (join-no-extra-cartesians sets)
          filtered (apply-predicates unified predicates)
          result (vec (doall (pmap #(reduce (fn [acc var] 
-                                             (println "i-v reduce var" var)
-                                             (println "%" %)
-                                             (println "second var" (when (coll? var) (second var)))
                                              (cond 
                                                (symbol? var) (conj acc (get % var))
                                                (and (coll? var) (= (first var) 'pull)) 

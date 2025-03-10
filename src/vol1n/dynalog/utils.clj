@@ -14,18 +14,13 @@
 
 (defn get-attribute-type [attribute]
   (let [constraints (get @schema/schema-cache attribute)]
-    (println "attrjidfs" attribute)
-    (println "constraints" constraints)
     (:db/valueType constraints)))
 
 (defn cast-value [attribute value]
-  (println "attribute" attribute)
-  (println "value" value)
   (if (contains? schema/reserved-attributes attribute)
     (keywordize-leading-colon value)
 
     (let [type (get-attribute-type attribute)]
-      (println "type" type)
       (if (nil? value)
         nil
         (case type
@@ -37,7 +32,6 @@
           :db.type/ref value)))))
 
 (defn- format-response [dynamo-response]
-  (println "format-response" dynamo-response)
   (keep (fn [item]
           (let [entity-id (get-in item [:entity-id :S])
                 attribute (get-in item [:attribute :S])
@@ -52,7 +46,6 @@
               nil))) (:Items dynamo-response)))
 
 (defn fetch-entity [dynamo table-name entity-id]
-  (println "fetch-entity " entity-id)
   (let [dynamo-response (aws/invoke dynamo
               {:op :Query
                :request {:TableName table-name
@@ -60,7 +53,6 @@
                          :KeyConditionExpression "#eid = :refval"
                          :ExpressionAttributeNames {"#eid" "entity-id"}
                          :ExpressionAttributeValues {":refval" {:S entity-id}}}})]
-    (println "dynamo-response" dynamo-response)
     (format-response dynamo-response)))
 
 (defn fetch-by-attribute [dynamo table-name attribute]

@@ -3,7 +3,6 @@
 
 ;; (d/pull db [:person/age {:person/friend [:person/name {:person/friend [:person/name]}]}] entity-id)
 (defn pull [conn pattern entity-id]
-  (println "pull" "pattern" pattern "entity-id" entity-id)
   (let [{direct-attrs false refs true} (group-by map? pattern)
         ref-keys (mapv (fn [map] (first (first map))) refs)
         keep-facts (set (concat direct-attrs ref-keys))
@@ -15,11 +14,5 @@
         ref-resolutions (mapv (fn [map] (let [k (first (first map))
                                               v (last (first map))]
                                           [k (future (pull conn v (k fetched-attrs)))])) refs)]
-    (println "keep-facts" keep-facts)
-    (println "refs" refs)
-    (println "ref-keys" ref-keys)
-    (println "fetched-attrs" fetched-attrs)
-    (println "entity-facts" entity-facts)
-    (println "ref resolutions" ref-resolutions)
     (into {} (vec (concat (mapv (fn [attr] [attr (attr fetched-attrs)]) direct-attrs)
                      (mapv (fn [[k v]] [k @v]) ref-resolutions))))))

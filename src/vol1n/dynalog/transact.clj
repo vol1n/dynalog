@@ -54,9 +54,6 @@
                     assigned-id-if-omitted (if (not (contains? ent :db/id)) 
                                              (assoc ent :db/id (generate-id))
                                              ent)]
-                (println "i" item)
-                (println "k" ent)
-                (println "j" assigned-id-if-omitted)
                 {:final (conj (:final acc) assigned-id-if-omitted) :assigned (:assigned no-temp-ids)}))
             {:final [] :assigned {}} data)))
 
@@ -119,17 +116,11 @@
 
 (defn unique-fact? [conn fact] 
   (aws/validate-requests (:dynamo conn) true)
-  (println "uf fact" fact)
   (let [table-name (:table-name conn)
         dynamo (:dynamo conn)
         response (utils/fetch-by-attribute-value dynamo table-name (:attribute fact) (:value fact)) 
         unique? (empty? response)
         dupe? (= (:entity-id fact) (:entity-id (first response)))]
-    (println "urgrg" (:first response))
-    (println "cool" (:entity-id fact))
-    (println "response" response)
-    (println "unique?" unique?)
-    (println "dupe?" dupe?)
     (if dupe?
       :duplicate
       unique?)))
@@ -281,8 +272,6 @@
 (defn put-unique-facts! [tx-id conn facts]
   (let [unique (vec (pmap #(unique-fact? conn %) facts))
         dupes-filtered (filter #(not= (first %) :duplicate) (map vector unique facts))]
-    (println "unique" unique)
-    (println "dupes-filtered" dupes-filtered)
     (if (every? identity unique)
       (let [inserts (pmap
                      (fn [batch]
@@ -350,8 +339,6 @@
         (rollback-tx! conn tx-id)
         {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "The following errors occured:" (vec (filter dynalog-error? results)))})
       (do
-        (println "schema inserts" (deref schema-inserts))
-        (println (count (deref schema-inserts)))
         (when (not (= (count (deref schema-inserts)) 0))
           (schema/update-schema! conn (:table-name conn)))
         {:items-written (count facts)}))))
@@ -397,9 +384,6 @@
                                    (if (not (= (get new-entity k) v))
                                      (conj mismatched k)
                                      mismatched)) compared-ent full-ent-schema)]
-    (println "full-ent-schema" full-ent-schema)
-    (println "compared-ent" compared-ent)
-    (println "compared-both" compared-both)
 
     (if (empty? compared-both)
       true
@@ -408,7 +392,6 @@
 (defn existing-schema-ent [conn entity]
   (aws/validate-requests (:dynamo conn))
   (let [existing (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) :db/ident (:db/ident entity))]
-    (println "existing" existing)
     (if (seq existing ) 
       existing
       nil)))
@@ -429,13 +412,11 @@
   (let [tx-id (generate-tx-id)
         deduped (deduplicate-tx-data (:tx-data tx))
         cleaned (validate-schema-entities conn deduped)]
-    (println "entities atp" cleaned)
     (if (nil? cleaned)
       {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " "schema facts are idempotent")}
       (let [{data-with-ids :final assigned :assigned} (assign-ids cleaned)
             invalid-entities (schema/validate data-with-ids)
             facts (entities-to-facts data-with-ids)]
-        (println "facx" facts)
         (if (seq invalid-entities)
         {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
         (let [put-result (put-all-facts! tx-id conn facts)]

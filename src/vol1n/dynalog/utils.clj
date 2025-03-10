@@ -14,19 +14,27 @@
 
 (defn get-attribute-type [attribute]
   (let [constraints (get @schema/schema-cache attribute)]
+    (println "attrjidfs" attribute)
+    (println "constraints" constraints)
     (:db/valueType constraints)))
 
 (defn cast-value [attribute value]
-  (let [type (get-attribute-type attribute)]
-    (if (nil? value)
-      nil
-      (case type
-        :db.type/keyword (keywordize-leading-colon value)
-        :db.type/string value
-        :db.type/boolean (if (= value "true") true false)
-        :db.type/long (Long/parseLong value)
-        :db.type/instant (java.time.Instant/parse value)
-        :db.type/ref value))))
+  (println "attribute" attribute)
+  (println "value" value)
+  (if (contains? schema/reserved-attributes attribute)
+    (keywordize-leading-colon value)
+
+    (let [type (get-attribute-type attribute)]
+      (println "type" type)
+      (if (nil? value)
+        nil
+        (case type
+          :db.type/keyword (keywordize-leading-colon value)
+          :db.type/string value
+          :db.type/boolean (if (= value "true") true false)
+          :db.type/long (Long/parseLong value)
+          :db.type/instant (java.time.Instant/parse value)
+          :db.type/ref value)))))
 
 (defn- format-response [dynamo-response]
   (println "format-response" dynamo-response)
@@ -44,6 +52,7 @@
               nil))) (:Items dynamo-response)))
 
 (defn fetch-entity [dynamo table-name entity-id]
+  (println "fetch-entity " entity-id)
   (let [dynamo-response (aws/invoke dynamo
               {:op :Query
                :request {:TableName table-name
@@ -51,6 +60,7 @@
                          :KeyConditionExpression "#eid = :refval"
                          :ExpressionAttributeNames {"#eid" "entity-id"}
                          :ExpressionAttributeValues {":refval" {:S entity-id}}}})]
+    (println "dynamo-response" dynamo-response)
     (format-response dynamo-response)))
 
 (defn fetch-by-attribute [dynamo table-name attribute]

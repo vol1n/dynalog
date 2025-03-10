@@ -15,6 +15,9 @@
 (defn- is-schema? [entity]
   (contains? entity :db/ident))
 
+(defn uuid-str? [s]
+  (boolean (re-matches #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" s)))
+
 (defn assign-ids [data]
   (let [attributes @schema/schema-cache
         ref-fields (keep (fn [[attribute constraints]] (when (= (:db/valueType constraints) :db.type/ref) attribute)) attributes)
@@ -27,7 +30,7 @@
               (let [item-id-fields (filter (fn [k] (contains? item k)) id-fields)
                     no-temp-ids (reduce (fn [item-acc k]
                                           (cond
-                                            (uuid? (k item)) item-acc ;; UUID -> user is referencing an item in the db
+                                            (or (uuid? (k item)) (uuid-str? (k item))) item-acc ;; UUID -> user is referencing an item in the db
                                                       ;; Temp ID that has already been assigned
                                             (and (string? (k item)) (contains? (:assigned item-acc) (k item))) (cond
                                                                                                                  (= k :db/id) (assoc-in item-acc [:item k] (get (:assigned item-acc) (k item)))
@@ -51,6 +54,9 @@
                     assigned-id-if-omitted (if (not (contains? ent :db/id)) 
                                              (assoc ent :db/id (generate-id))
                                              ent)]
+                (println "i" item)
+                (println "k" ent)
+                (println "j" assigned-id-if-omitted)
                 {:final (conj (:final acc) assigned-id-if-omitted) :assigned (:assigned no-temp-ids)}))
             {:final [] :assigned {}} data)))
 
@@ -113,11 +119,20 @@
 
 (defn unique-fact? [conn fact] 
   (aws/validate-requests (:dynamo conn) true)
+  (println "uf fact" fact)
   (let [table-name (:table-name conn)
         dynamo (:dynamo conn)
-        response (utils/fetch-by-attribute-value dynamo table-name (:attribute fact) (:value fact))
-        unique? (empty? response)]
-    unique?))
+        response (utils/fetch-by-attribute-value dynamo table-name (:attribute fact) (:value fact)) 
+        unique? (empty? response)
+        dupe? (= (:entity-id fact) (:entity-id (first response)))]
+    (println "urgrg" (:first response))
+    (println "cool" (:entity-id fact))
+    (println "response" response)
+    (println "unique?" unique?)
+    (println "dupe?" dupe?)
+    (if dupe?
+      :duplicate
+      unique?)))
 
 (defn valid-ref? [conn fact]
   (aws/validate-requests (:dynamo conn) true)
@@ -264,15 +279,18 @@
   (:vol1n.dynalog/error item))
 
 (defn put-unique-facts! [tx-id conn facts]
-  (let [unique (vec (pmap #(unique-fact? conn %) facts))]
+  (let [unique (vec (pmap #(unique-fact? conn %) facts))
+        dupes-filtered (filter #(not= (first %) :duplicate) (map vector unique facts))]
+    (println "unique" unique)
+    (println "dupes-filtered" dupes-filtered)
     (if (every? identity unique)
       (let [inserts (pmap
                      (fn [batch]
                        (with-retries #(put-batch! tx-id conn %) batch #(fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
                                                                                       (:vol1n.dynalog.error/items result)
-                                                                                      items)) 3))
+                                                                                      (mapv last dupes-filtered))) 3))
                      (partition-all 25 facts))]
-        inserts)
+        (vec inserts))
       {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/message (str "The following facts are not unique: " (vec (keep-indexed #(when (false? %2) (nth facts %1)) unique)))})))
 
 (defn put-ref-facts! [tx-id conn facts]
@@ -288,13 +306,14 @@
       (let [invalid-refs (vec (keep-indexed #(when (nil? %2) (nth facts %1)) valid-refs))]
         {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/message (str "The following facts are not valid refs: " (vec (keep-indexed #(when (false? %2) (nth facts %1)) valid-refs)))}))))
 
+
 (defn put-schema-facts! [tx-id conn facts]
   (let [{ident-facts :ident schema-facts :schema} (group-by #(if (= (:attribute %) :db/ident)
                                                                :ident
                                                                :schema) facts)
         ident-inserts (future (put-unique-facts! tx-id conn ident-facts))
         schema-inserts (future (validate-and-put-schema-facts! tx-id conn schema-facts))
-        results [(deref schema-inserts) (deref ident-inserts)]]
+        results (concat (deref schema-inserts) (deref ident-inserts))]
     results))
 
 
@@ -329,8 +348,10 @@
     (if (some dynalog-error? results)
       (do
         (rollback-tx! conn tx-id)
-        {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "The following facts failed to insert: " (vec (keep-indexed #(when (dynalog-error? %2) (nth facts %1)) results)))})
+        {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "The following errors occured:" (vec (filter dynalog-error? results)))})
       (do
+        (println "schema inserts" (deref schema-inserts))
+        (println (count (deref schema-inserts)))
         (when (not (= (count (deref schema-inserts)) 0))
           (schema/update-schema! conn (:table-name conn)))
         {:items-written (count facts)}))))
@@ -365,24 +386,68 @@
   (let [unique-facts (into #{} (map #(select-keys % [:db/id :attribute :value]) tx-data))]
     (filter #(contains? unique-facts (select-keys % [:db/id :attribute :value])) tx-data)))  
 
+(defn duplicate-schema-ent? [conn new-entity existing]
+  (let [ent-facts (utils/fetch-entity (:dynamo conn) (:table-name conn) (:db/id existing))
+        full-ent-schema (into {} (map (fn [fact] [(:attribute fact) (:value fact)]) ent-facts))
+        compared-ent (reduce-kv (fn [mismatched k v]
+                                  (if (not (= (get full-ent-schema k) v))
+                                    (conj mismatched k)
+                                    mismatched)) #{} new-entity)
+        compared-both (reduce-kv (fn [mismatched k v]
+                                   (if (not (= (get new-entity k) v))
+                                     (conj mismatched k)
+                                     mismatched)) compared-ent full-ent-schema)]
+    (println "full-ent-schema" full-ent-schema)
+    (println "compared-ent" compared-ent)
+    (println "compared-both" compared-both)
+
+    (if (empty? compared-both)
+      true
+      false)))
+
+(defn existing-schema-ent [conn entity]
+  (aws/validate-requests (:dynamo conn))
+  (let [existing (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) :db/ident (:db/ident entity))]
+    (println "existing" existing)
+    (if (seq existing ) 
+      existing
+      nil)))
+
+(defn validate-schema-entities [conn entities] 
+  (let [{schema-entities true other false} (group-by is-schema? entities)
+        new-list (reduce (fn [new ent]
+                                   (if-let [existing (existing-schema-ent conn ent)]
+                                     (if (duplicate-schema-ent? conn ent existing)
+                                       new
+                                       (conj new :invalid))
+                                     (conj new ent))) [] schema-entities)]
+    (if (contains? new-list :invalid)
+      nil
+      (concat schema-entities other))))
+
 (defn transact [conn tx]
   (let [tx-id (generate-tx-id)
         deduped (deduplicate-tx-data (:tx-data tx))
-        {data-with-ids :final assigned :assigned} (assign-ids deduped)
-        invalid-entities (schema/validate data-with-ids)
-        facts (entities-to-facts data-with-ids)]
-    (if (seq invalid-entities)
-      {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
-      (let [put-result (put-all-facts! tx-id conn facts)]
-        (if (dynalog-error? put-result)
-          put-result
-          (do
-            (swap! utils/cache #(reduce (fn [acc fact]
-                                          (if (map? fact)
-                                            (-> acc
-                                                (dissoc-in [:attr-value (str (:attribute fact) "#" (:value fact))])
-                                                (dissoc-in [:attribute (:attribute fact)])
-                                                (dissoc-in [:entity-id-attribute (str (:entity-id fact) "#" (:attribute fact))])
-                                                (dissoc-in [:entity-id (:entity-id fact)]))
-                                            acc)) % facts))
-            (assoc put-result :tempids assigned :success true :tx-id tx-id)))))))
+        cleaned (validate-schema-entities conn deduped)]
+    (println "entities atp" cleaned)
+    (if (nil? cleaned)
+      {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " "schema facts are idempotent")}
+      (let [{data-with-ids :final assigned :assigned} (assign-ids cleaned)
+            invalid-entities (schema/validate data-with-ids)
+            facts (entities-to-facts data-with-ids)]
+        (println "facx" facts)
+        (if (seq invalid-entities)
+        {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
+        (let [put-result (put-all-facts! tx-id conn facts)]
+          (if (dynalog-error? put-result)
+            put-result
+            (do
+              (swap! utils/cache #(reduce (fn [acc fact]
+                                            (if (map? fact)
+                                              (-> acc
+                                                  (dissoc-in [:attr-value (str (:attribute fact) "#" (:value fact))])
+                                                  (dissoc-in [:attribute (:attribute fact)])
+                                                  (dissoc-in [:entity-id-attribute (str (:entity-id fact) "#" (:attribute fact))])
+                                                  (dissoc-in [:entity-id (:entity-id fact)]))
+                                              acc)) % facts))
+              (assoc put-result :tempids assigned :success true :tx-id tx-id)))))))))

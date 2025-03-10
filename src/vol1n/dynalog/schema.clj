@@ -41,7 +41,8 @@
     (parse-schema (:Items response))))
 
 (defn update-schema! [client table-name]
-  (reset! schema-cache (get-schema client table-name)))
+  (reset! schema-cache (get-schema client table-name))
+  (println "schema updated"))
 
 (defn- valid-value? [value constraints] 
   (if-let [value-type (:db/valueType constraints)]

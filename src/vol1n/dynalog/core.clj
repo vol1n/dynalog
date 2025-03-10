@@ -144,6 +144,6 @@
 
 (defn db [conn]
   (when (:connected conn)
-    {:db/status "connected"
+    (merge conn {:db/status "connected"
      :aws-region (:aws-region conn)
-     :table-name (:table-name conn)}))
+     :table-name (:table-name conn)})))

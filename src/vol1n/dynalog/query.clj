@@ -183,9 +183,8 @@
   (fn [bindings]
     (apply-fn (to-fn call) bindings (get-fn-deps call))))
 
-(defn build-resolvers [in where]
-  (let [conn ('$ in)
-        clauses (replace-all-variables in where)
+(defn build-resolvers [conn in where]
+  (let [clauses (replace-all-variables in where)
         resolvers (reduce (fn [acc clause]
                             (cond
                               (= (count clause) 3)
@@ -262,9 +261,13 @@
 
 (defn q [body & inputs]
   (let [parsed (parse-query body)
-        input-map (zipmap (:in parsed) inputs)
-        conn ('$ input-map)
-        resolvers (build-resolvers input-map (:where parsed))
+        input-map (if (:in parsed)
+                    (zipmap (:in parsed) inputs)
+                    nil)
+        conn (if (nil? input-map)
+               (first inputs)
+               ('$ input-map))
+        resolvers (build-resolvers conn input-map (:where parsed))
         fn-clauses (filter (fn [clause] (= (count clause) 2)) (:where parsed))
         sorted-fn-clause (sort-fn-clauses fn-clauses) 
         attribute-clauses (filter (fn [clause] (= (count clause) 3)) (:where parsed))

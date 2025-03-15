@@ -19,7 +19,6 @@
 (defn cast-value [attribute value]
   (if (contains? schema/reserved-attributes attribute)
     (keywordize-leading-colon value)
-
     (let [type (get-attribute-type attribute)]
       (if (nil? value)
         nil
@@ -28,6 +27,8 @@
           :db.type/string value
           :db.type/boolean (if (= value "true") true false)
           :db.type/long (Long/parseLong value)
+          :db.type/float (Float/parseFloat value)
+          :db.type/double (Double/parseDouble value)
           :db.type/instant (java.time.Instant/parse value)
           :db.type/ref value)))))
 
@@ -83,8 +84,9 @@
                          :IndexName "entity-id-attribute-index"
                          :KeyConditionExpression "#eidattr = :val"
                          :ExpressionAttributeNames {"#eidattr" "entity-id-attribute"}
-                         :ExpressionAttributeValues {":val" {:S (str entity-id "#" attribute)}}}})]
-    (format-response dynamo-response)))
+                         :ExpressionAttributeValues {":val" {:S (str entity-id "#" attribute)}}}})
+        result (format-response dynamo-response)] 
+    result))
 
 (defn fetch-by-entity-id-attribute-value [dynamo table-name entity-id attribute value]
   (let [dynamo-response (aws/invoke dynamo

@@ -16,34 +16,73 @@
   (contains? entity :db/ident))
 
 (defn uuid-str? [s]
-  (boolean (re-matches #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" s)))
+  (if (keyword? s)
+    false
+    (boolean (re-matches #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" s))))
 
 (defn assign-ids [data]
   (let [attributes @schema/schema-cache
+        ident-map @schema/ident-cache
         ref-fields (keep (fn [[attribute constraints]] (when (= (:db/valueType constraints) :db.type/ref) attribute)) attributes)
         id-fields (conj ref-fields :db/id)
-        temp-id-in-tx? (fn [temp-id] 
+        temp-id-in-tx? (fn [temp-id]
                          (some #(if (= (:db/id %) temp-id)
-                                     true 
+                                     true
                                      nil) data))]
     (reduce (fn [acc item]
+              (if (not (map? item))
+                {:final (conj (:final acc) item) :assigned (:assigned acc)}
               (let [item-id-fields (filter (fn [k] (contains? item k)) id-fields)
-                    no-temp-ids (reduce (fn [item-acc k]
+                    no-temp-ids (reduce (fn [item-acc k] 
                                           (cond
-                                            (or (uuid? (k item)) (uuid-str? (k item))) item-acc ;; UUID -> user is referencing an item in the db
-                                                      ;; Temp ID that has already been assigned
+                                            (and (coll? (k item)) 
+                                                 (keyword? (first (k item)))
+                                                 (= (:db/unique (get attributes (first (k item)))) :db.unique/identity)) (assoc-in item-acc [:item k] (k item)) ;; lookup ref, because the leading keyword is not an ident
+                                            (coll? (k item)) (let [reduced (reduce (fn [coll-acc v]
+                                                                                     (cond 
+                                                                                       (or (uuid? v) (uuid-str? v)) (if (temp-id-in-tx? v)
+                                                                                                                        (-> coll-acc
+                                                                                                                          (update :new-list conj v)
+                                                                                                                          (update :new-valid-refs conj [k v]))
+                                                                                                                      (update coll-acc :new-list conj v))
+                                                                                       (keyword? v) (-> coll-acc
+                                                                                                        (update :new-list conj (get ident-map v))
+                                                                                                        (update :new-valid-refs conj [k (get ident-map v)])) ;; ident ref
+                                                                                       (string? v) (if (contains? (:assigned item-acc) v)
+                                                                                                     (-> coll-acc
+                                                                                                         (update :new-list conj (get (:assigned item-acc) v))
+                                                                                                         (update :new-valid-refs conj [k (get (:assigned item-acc) v)]))
+                                                                                                     (if (temp-id-in-tx? v)
+                                                                                                       (let [new-id (generate-id) 
+                                                                                                             assigned-new-id (update coll-acc :new-list #(conj % new-id))
+                                                                                                             added-to-assigned-map (assoc-in assigned-new-id [:new-assigned v] new-id)]
+                                                                                                         (update added-to-assigned-map :new-valid-refs conj [k new-id]))
+                                                                                                       (throw (ex-info "Temp id used as ref but not assigned in tx" {:item item})))))) 
+                                                                                   {:new-list [] :new-assigned {} :new-valid-refs []} (k item))
+                                                                   with-resolved-list (assoc-in item-acc [:item k] (:new-list reduced))
+                                                                   with-new-assignments (update with-resolved-list :assigned merge (:new-assigned reduced))]
+                                                               (update-in
+                                                                with-new-assignments
+                                                                [:item :valid-refs] (fnil concat []) (:new-valid-refs reduced)))
+                                            (or (uuid? (k item)) (uuid-str? (k item))) (if 
+                                                                                        (temp-id-in-tx? (k item))
+                                                                                        (update-in item-acc [:item :valid-refs] conj [k (k item)])
+                                                                                        item-acc) ;; UUID -> user is referencing an item in the db  
+                                            (keyword? (k item)) (-> item-acc
+                                                                    (assoc-in [:item k] (get ident-map (k item)))
+                                                                    (update-in [:item :valid-refs] (fnil conj []) [k (get ident-map (k item))]))
                                             (and (string? (k item)) (contains? (:assigned item-acc) (k item))) (cond
                                                                                                                  (= k :db/id) (assoc-in item-acc [:item k] (get (:assigned item-acc) (k item)))
                                                                                                                  :else (update-in
                                                                                                                         (assoc-in item-acc [:item k] (get (:assigned item-acc) (k item)))
-                                                                                                                        [:item :valid-refs] (fnil conj []) k)) ;; This is a ref, but it must be valid because it has been assigned this tx
+                                                                                                                        [:item :valid-refs] (fnil conj []) [k (get (:assigned item-acc) (k item))])) ;; This is a ref, but it must be valid because it has been assigned this tx
                                             (and (not (= k :db/id)) (string? (k item)) (temp-id-in-tx? (k item))) (let [temp-id (k item)
                                                                                                                         new-id (generate-id)
                                                                                                                         assigned-new-id (assoc-in item-acc [:item k] new-id)
                                                                                                                         added-to-assigned-map (assoc-in assigned-new-id [:assigned temp-id] new-id)]
                                                                                                                     (update-in
                                                                                                                      added-to-assigned-map
-                                                                                                                     [:item :valid-refs] (fnil conj []) k))
+                                                                                                                     [:item :valid-refs] (fnil conj []) [k new-id]))
                                                       ;; Temp ID that needs to be assigned, generate and keep track of it
                                             (string? (k item))
                                             (let [temp-id (k item)
@@ -52,9 +91,11 @@
                                         {:item item :assigned (:assigned acc)} item-id-fields)
                     ent (:item no-temp-ids)
                     assigned-id-if-omitted (if (not (contains? ent :db/id)) 
-                                             (assoc ent :db/id (generate-id))
+                                             (if (contains? ent :db/ident)
+                                               (assoc ent :db/id (or (get ident-map (get ent :db/ident)) (generate-id)))
+                                               (assoc ent :db/id (generate-id)))
                                              ent)]
-                {:final (conj (:final acc) assigned-id-if-omitted) :assigned (:assigned no-temp-ids)}))
+                {:final (conj (:final acc) assigned-id-if-omitted) :assigned (:assigned no-temp-ids)})))
             {:final [] :assigned {}} data)))
 
 (defn- query-by-tx-id [conn tx-id]
@@ -92,6 +133,7 @@
               "tx-id" {:S (str tx-id)}
               "latest" {:N "1"}
               "is-schema" {:N (if (:is-schema fact) "1" "0")}
+              "is-ident" {:N (if (= (:attribute fact) :db/ident) "1" "0")}
               "entity-id-attribute" {:S (str (:entity-id fact) "#" (:attribute fact))}
               "entity-id-attribute-value" {:S (str (:entity-id fact) "#" (:attribute fact) "#" (:value fact))}}]
     (if (:is-numerical item)
@@ -111,8 +153,8 @@
            (let [new-items (retry-fn result items)]
              (async/<! (async/timeout (* 50 (Math/pow 2 attempt))))  ;; Exponential backoff
              (recur (inc attempt) new-items))
-         result)  ;; Stop retrying <- result is a dynomic error
-       result)))))  ;; If no AWS error, return the result
+           result)  ;; Stop retrying <- result is a dynomic error
+         result)))))  ;; If no AWS error, return the result
 
 (defn unique-fact? [conn fact] 
   (aws/validate-requests (:dynamo conn) true)
@@ -174,18 +216,20 @@
     (if (every? identity valid-schema-facts)
       (let [inserts (pmap
                      (fn [batch]
-                       (with-retries #(put-batch! tx-id conn %) batch #(fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
+                       (with-retries #(put-batch! tx-id conn %) batch (fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
                                                                                             (:vol1n.dynalog.error/items result)
                                                                                             items)) 3))
                      (partition-all 25 facts))]
-        inserts) 
+        (vec inserts))
       {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/message (str "The following facts are not unique: " (vec (keep-indexed #(when (false? %2) (nth facts %1)) valid-schema-facts)))})))
 
 (defn dissoc-in [m [k & ks]]
   (if ks
-    (update m k #(let [res (dissoc-in % ks)]
-                   (if (empty? res) nil res)))
-    (dissoc m k)))
+    (let [updated (dissoc-in (get m k) ks)]
+      (if (empty? updated)
+        (dissoc m k)  ;; Remove the key entirely if empty
+        (assoc m k updated)))  ;; Otherwise, update with the new value
+    (dissoc m k)))  ;; Remove the key when no more keys are left
 
 (defn remove-facts-from-cache! [facts] 
   (swap! utils/cache #(reduce (fn [acc fact]
@@ -213,7 +257,7 @@
                                                               :ExpressionAttributeNames {"#ret" "retracted"}
                                                               :ExpressionAttributeValues {":tx" {:S (str tx-id)}}}}) (:Items facts))]
     (remove-facts-from-cache! facts)
-    updates))
+    (vec updates)))
 
 (defn retract-attribute! [r tx-id conn]
   (let [[entity-id attribute] (rest r)
@@ -232,9 +276,10 @@
                                                 :ExpressionAttributeNames {"#ret" "retracted"}
                                                 :ExpressionAttributeValues {":tx" {:S (str tx-id)}}}}]
                          (aws/invoke (:dynamo conn) payload)) (:Items facts))]
-    updates))
+    (remove-facts-from-cache! facts)
+    (vec updates)))
 
-(defn retract-attribute-value! [r tx-id conn]
+(defn retract-attribute-value! [r tx-id conn] 
   (let [[entity-id attribute value] (rest r)
         facts (aws/invoke (:dynamo conn)
                           {:op :Query
@@ -252,7 +297,7 @@
                                                 :ExpressionAttributeValues {":tx" {:S (str tx-id)}}}}] 
                          (aws/invoke (:dynamo conn) payload)) (:Items facts))] 
     (remove-facts-from-cache! facts)
-    updates))
+    (vec updates)))
 
 (defn do-retractions! [to-retract tx-id conn] ;; [:db/retract eid attribute value]
   (let [{entity-retractions 2
@@ -264,7 +309,7 @@
         failed (filter #(:vol1n.dynalog/error (second %)) retractions)]
     (if (seq failed)
       {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/code "InternalError" :vol1n.dynalog.error/message "Retraction failed" :vol1n.dynalog.error/failed (mapv first failed)}
-      (map second retractions))))
+      (map second (vec retractions)))))
 
 (defn dynalog-error? [item]
   (:vol1n.dynalog/error item))
@@ -275,7 +320,8 @@
     (if (every? identity unique)
       (let [inserts (pmap
                      (fn [batch]
-                       (with-retries #(put-batch! tx-id conn %) batch #(fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
+                       (with-retries #(put-batch! tx-id conn %) batch (fn [result items] 
+                                                                         (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
                                                                                       (:vol1n.dynalog.error/items result)
                                                                                       (mapv last dupes-filtered))) 3))
                      (partition-all 25 facts))]
@@ -287,13 +333,13 @@
     (if (every? identity valid-refs)
       (let [inserts (pmap
                      (fn [batch]
-                       (with-retries #(put-batch! tx-id conn %) batch #(fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
+                       (with-retries #(put-batch! tx-id conn %) batch (fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
                                                                                             (:vol1n.dynalog.error/items result)
                                                                                             items)) 3))
                      (partition-all 25 facts))]
-        inserts)
-      (let [invalid-refs (vec (keep-indexed #(when (nil? %2) (nth facts %1)) valid-refs))]
-        {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/message (str "The following facts are not valid refs: " (vec (keep-indexed #(when (false? %2) (nth facts %1)) valid-refs)))}))))
+        (vec inserts))
+      (let [invalid-refs (vec (keep-indexed #(when (not %2) (nth facts %1)) valid-refs))]
+        {:vol1n.dynalog/error true :vol1n.dynalog.error/aws true :vol1n.dynalog.error/message (str "The following facts are not valid refs: " invalid-refs)}))))
 
 
 (defn put-schema-facts! [tx-id conn facts]
@@ -304,7 +350,6 @@
         schema-inserts (future (validate-and-put-schema-facts! tx-id conn schema-facts))
         results (concat (deref schema-inserts) (deref ident-inserts))]
     results))
-
 
 (defn is-unique? [fact]
   (= (:db/unique ((:attribute fact) @schema/schema-cache)) :db.unique/value))
@@ -325,7 +370,7 @@
                                                                                                                       :else :normal) facts)
         inserts (pmap
                  (fn [batch]
-                   (with-retries #(put-batch! tx-id conn %) batch #(fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
+                   (with-retries #(put-batch! tx-id conn %) batch (fn [result items] (if (= (:vol1n.dynalog.error/code result) "ItemsUnprocessed")
                                                                                         (:vol1n.dynalog.error/items result)
                                                                                         items)) 3))
                  (partition-all 25 facts))
@@ -334,47 +379,138 @@
         ref-inserts (future (put-ref-facts! tx-id conn ref-facts))
         retractions (future (do-retractions! to-retract tx-id conn))
         results (doall (conj (doall inserts) (deref unique-inserts) (deref schema-inserts) (deref ref-inserts) (deref retractions)))]
-    (if (some dynalog-error? results)
+    (if (some dynalog-error? (flatten results))
       (do
         (rollback-tx! conn tx-id)
         {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "The following errors occured:" (vec (filter dynalog-error? results)))})
       (do
         (when (not (= (count (deref schema-inserts)) 0))
-          (schema/update-schema! conn (:table-name conn)))
+          (schema/update-schema! conn (:table-name conn))
+          (schema/update-ident-cache! conn (:table-name conn)))
         {:items-written (count facts)}))))
 
 (def numerical-types #{:db.type/long
                        :db.type/float
-                       :db.type/double
+                       :db.type/double 
                        :db.type/instant})
 
-(defn entities-to-facts [entities]
-  (let [attributes @schema/schema-cache]
-    (vec (mapcat
-     (fn [ent]
-       (if (map? ent) 
-        (keep (fn [[k v]]
-                (cond ;; filter db/id as it is implicit in all entities
-                  (= k :valid-refs) nil
-                  (= k :db/id) nil
-                  :else {:entity-id (:db/id ent)
-                         :attribute k
-                         :value v
-                         :is-schema (is-schema? ent)
-                         :is-valid-ref (boolean (some #{k} (:valid-refs ent)))
-                         :as-number (when (numerical-types (:db/valueType (k attributes)))
-                                      (cond 
-                                        (= k :db.type/instant) (.getTime v)
-                                        :else v))}))
-              (seq ent))
-        [ent])) entities))))
+(defn conflicting-ident-fact [conn attribute value]
+  (let [conflict (first (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) attribute value))]
+    conflict))
+
+(defn handle-ident-attributes [conn entities attributes]
+  (let [is-ident-attr? #(= :db.unique/identity (:db/unique (% attributes)))
+        modified (vec (pmap (fn [ent]
+                              (if (map? ent)
+                                (if-let [ident-attrs (seq (keep (fn [[k _]] (when (is-ident-attr? k) k)) ent))]
+                                  (if-let [new-eid (reduce (fn [matching-eid attr]
+                                                             (if-let [conflicting-ent (conflicting-ident-fact conn attr (attr ent))]
+                                                               (if (or (nil? matching-eid) (= matching-eid (:entity-id conflicting-ent)))
+                                                                 (:entity-id conflicting-ent)
+                                                                 (throw (ex-info "Conflicting ident facts" {:conflicting-eid (:entity-id conflicting-ent) :matching-eid matching-eid :attr attr :value (attr ent)})))
+                                                               matching-eid)) nil ident-attrs)]
+                                    [(assoc ent :db/id new-eid) {:old (:entity-id ent) :new new-eid}]
+                                    [ent {}])
+                                  [ent {}])
+                                [ent {}]))
+                            entities))
+        replacements (reduce #(merge %1 (second %2)) {} modified) ;; These are the entity ids that are being merged
+        replaced (map (fn [[ent _]]
+                        (if (map? ent)
+                        (reduce-kv (fn [acc attribute value] 
+                                     (if (contains? replacements value)
+                                       (assoc acc attribute (get replacements value))
+                                       (assoc acc attribute value))) {} ent)
+                          ent)) modified)]
+    replaced))
+
+(defn retract-previous [conn fact]
+  (if-let [old-fact (first (utils/fetch-by-entity-id-attribute (:dynamo conn) (:table-name conn) (:entity-id fact) (:attribute fact)))]
+    (if (= (:value old-fact) (:value fact))
+      ::dupe
+      [:db/retract (:entity-id old-fact) (:attribute fact) (:value old-fact)])
+    nil))
+
+(defn retract-cardinality-one-violations! [tx-id conn facts attributes]
+  (let [[retractions facts]  (apply map vector (vec (pmap (fn [fact]
+                                  (if (map? fact)
+                                    (if-not (:is-schema fact)
+                                      (let [attribute (:attribute fact)
+                                            constraints (attribute attributes)
+                                            cardinality (or (:db/cardinality constraints) :db.cardinality/one)]
+                                        (if (= cardinality :db.cardinality/one) 
+                                          (let [new-retraction (retract-previous conn fact)]
+                                            (if (= new-retraction ::dupe)
+                                              [nil nil]
+                                              [new-retraction fact]))
+                                          [nil fact]))
+                                      [nil fact])
+                                    [nil fact]))
+                                facts)))]
+    (do-retractions! (keep identity retractions) tx-id conn)
+    (keep identity facts)))
+
+(defn find-lookup-ref [conn attribute value]
+  (let [fetch-result (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) attribute value)]
+    (first fetch-result)))
+
+(defn entities-to-facts [tx-id conn entities]
+  (let [attributes @schema/schema-cache
+        ident-attributes-handled (handle-ident-attributes conn entities attributes)
+        facts (vec (mapcat
+                    (fn [ent]
+                      (if (map? ent)
+                        (reduce-kv (fn [facts attribute value] 
+                                     (cond ;; filter db/id as it is implicit in all entities
+                                       (= attribute :valid-refs) facts
+                                       (= attribute :db/id) facts
+                                       (coll? value) (if (= (:db/cardinality (attribute attributes)) :db.cardinality/many) ;; collection of values for a many attribute, simple just add more facts
+                                                       (concat facts (reduce (fn [acc val]
+                                                                               (conj acc {:entity-id (:db/id ent)
+                                                                                          :attribute attribute
+                                                                                          :value val
+                                                                                          :is-schema (is-schema? ent)
+                                                                                          :is-valid-ref (boolean ((set (:valid-refs ent)) [attribute val]))
+                                                                                          :as-number (when (numerical-types (:db/valueType (attribute attributes)))
+                                                                                                       (cond
+                                                                                                         (= attribute :db.type/instant) (.getTime val)
+                                                                                                         :else val))})) [] value))
+                                                       (if (and (keyword? (first value))
+                                                                (= (:db/valueType (attribute attributes)) :db.type/ref) ;; This must be a lookup ref or is invalid
+                                                                (= (count value) 2) ;; lookup refs have 2 items in them
+                                                                (= (:db/unique ((first value) attributes)) :db.unique/identity)) ;; The attribute being used to reference MUST be :db.unique/identity
+                                                         (if-let [matching (find-lookup-ref conn (first value) (last value))]
+                                                           (conj facts {:entity-id (:db/id ent)
+                                                                        :attribute attribute
+                                                                        :value (:entity-id matching)
+                                                                        :is-schema (is-schema? ent)
+                                                                        :is-valid-ref true
+                                                                        :as-number (when (numerical-types (:db/valueType (attribute attributes)))
+                                                                                     (cond
+                                                                                       (= attribute :db.type/instant) (.getTime (first value))
+                                                                                       :else (first value)))})
+                                                           (throw (ex-info "Invalid lookup ref" {:value value})))
+                                                         (throw (ex-info "Invalid coll in tx-data" {:value value}))
+                                                         ))
+                                       :else (conj facts {:entity-id (:db/id ent)
+                                                          :attribute attribute
+                                                          :value value
+                                                          :is-schema (is-schema? ent)
+                                                          :is-valid-ref (boolean ((set (:valid-refs ent)) [attribute value]));;(boolean (some #{attribute} (:valid-refs ent)))
+                                                          :as-number (when (numerical-types (:db/valueType (attribute attributes)))
+                                                                       (cond
+                                                                         (= attribute :db.type/instant) (.getTime value)
+                                                                         :else value))})))
+                                   [] ent)
+                        [ent])) ident-attributes-handled))]
+        (retract-cardinality-one-violations! tx-id conn facts attributes)))
 
 (defn deduplicate-tx-data [tx-data]
   (let [unique-facts (into #{} (map #(select-keys % [:db/id :attribute :value]) tx-data))]
     (filter #(contains? unique-facts (select-keys % [:db/id :attribute :value])) tx-data)))  
 
 (defn duplicate-schema-ent? [conn new-entity existing]
-  (let [ent-facts (utils/fetch-entity (:dynamo conn) (:table-name conn) (:db/id existing))
+  (let [ent-facts (utils/fetch-entity (:dynamo conn) (:table-name conn) (:entity-id existing))
         full-ent-schema (into {} (map (fn [fact] [(:attribute fact) (:value fact)]) ent-facts))
         compared-ent (reduce-kv (fn [mismatched k v]
                                   (if (not (= (get full-ent-schema k) v))
@@ -392,8 +528,8 @@
 (defn existing-schema-ent [conn entity]
   (aws/validate-requests (:dynamo conn))
   (let [existing (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) :db/ident (:db/ident entity))]
-    (if (seq existing ) 
-      existing
+    (if (seq existing) 
+      (first existing)
       nil)))
 
 (defn validate-schema-entities [conn entities] 
@@ -416,19 +552,19 @@
       {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " "schema facts are idempotent")}
       (let [{data-with-ids :final assigned :assigned} (assign-ids cleaned)
             invalid-entities (schema/validate data-with-ids)
-            facts (entities-to-facts data-with-ids)]
+            facts (entities-to-facts tx-id conn data-with-ids)]
         (if (seq invalid-entities)
-        {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
-        (let [put-result (put-all-facts! tx-id conn facts)]
-          (if (dynalog-error? put-result)
-            put-result
-            (do
-              (swap! utils/cache #(reduce (fn [acc fact]
-                                            (if (map? fact)
-                                              (-> acc
-                                                  (dissoc-in [:attr-value (str (:attribute fact) "#" (:value fact))])
-                                                  (dissoc-in [:attribute (:attribute fact)])
-                                                  (dissoc-in [:entity-id-attribute (str (:entity-id fact) "#" (:attribute fact))])
-                                                  (dissoc-in [:entity-id (:entity-id fact)]))
-                                              acc)) % facts))
-              (assoc put-result :tempids assigned :success true :tx-id tx-id)))))))))
+          {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
+          (let [put-result (put-all-facts! tx-id conn facts)]
+            (if (dynalog-error? put-result)
+                put-result
+              (do
+                (swap! utils/cache #(reduce (fn [acc fact]
+                                              (if (map? fact)
+                                                (-> acc
+                                                    (dissoc-in [:attr-value (str (:attribute fact) "#" (:value fact))])
+                                                    (dissoc-in [:attribute (:attribute fact)])
+                                                    (dissoc-in [:entity-id-attribute (str (:entity-id fact) "#" (:attribute fact))])
+                                                    (dissoc-in [:entity-id (:entity-id fact)]))
+                                                acc)) % facts))
+                (assoc put-result :tempids assigned :success true :tx-id tx-id)))))))))

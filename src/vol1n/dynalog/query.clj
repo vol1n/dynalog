@@ -1,32 +1,40 @@
 (ns vol1n.dynalog.query
-   (:require [vol1n.dynalog.utils :as utils]
-             [clojure.set :as set]
-             [vol1n.dynalog.pull :as p]))
+  (:require [vol1n.dynalog.utils :as utils]
+            [clojure.set :as set]
+            [vol1n.dynalog.pull :as p]
+            [vol1n.dynalog.schema :as schema]))
 
 (defn parse-query [query]
   (let [sections (partition-by keyword? query)
         section-map (into {} (map (fn [[k & v]] [(first k) (first v)]) (partition 2 sections)))]
     section-map))
 
-
 (defn replace-variables [known-variables condition]
-  (mapv #(if (and (symbol? %) (contains? known-variables %))
-           (% known-variables)
-           %) condition))
+  (if (list? (first condition))
+    (let [[call & rest] condition
+          [f & args] call
+          replaced (vec (cons (apply list (cons f (replace-variables known-variables args))) rest))]
+      replaced)
+    (mapv #(if (and (symbol? %) (contains? known-variables %))
+             (% known-variables)
+             %) condition)))
 
 (defn replace-all-variables [known-variables conditions]
-  (mapv #(replace-variables known-variables %) conditions))
- 
- 
+  (if (nil? known-variables)
+    conditions
+    (mapv #(replace-variables known-variables %) conditions)))
+
+
 (defn get-by-attribute [attribute conn]
   (let [cache-hit (get-in @utils/cache [:attribute attribute])
         result (if (nil? cache-hit)
                  (utils/fetch-by-attribute (:dynamo conn) (:table-name conn) attribute)
                  cache-hit)
         attribute-value-cache-updates (reduce (fn [acc fact] (update acc (str attribute "#" (:value fact)) (fnil conj #{}) fact)) {} result)]
-    (swap! utils/cache #(assoc-in % [:attribute attribute] result)) 
+
+    (swap! utils/cache #(assoc-in % [:attribute attribute] result))
     (swap! utils/cache #(reduce (fn [acc [k v]] (update acc k (fnil conj #{}) (set v))) % attribute-value-cache-updates))
-    result)) 
+    result))
 
 (defn get-by-entity-id-attribute [attribute entity-id conn]
   (let [cache-hit (get-in @utils/cache [:entity-id-attribute (str entity-id "#" attribute)])
@@ -34,28 +42,30 @@
                  (utils/fetch-by-entity-id-attribute (:dynamo conn) (:table-name conn) entity-id attribute)
                  cache-hit)
         attribute-value-cache-updates (reduce (fn [acc fact] (update acc (str attribute "#" (:value fact)) (fnil conj #{}) fact)) {} result)]
-    (swap! utils/cache #(assoc-in % [:entity-id-attribute (str entity-id "#" attribute)] result)) 
+    (swap! utils/cache #(assoc-in % [:entity-id-attribute (str entity-id "#" attribute)] result))
     (swap! utils/cache #(reduce (fn [acc [k v]] (update acc k (fnil conj #{}) (set v))) % attribute-value-cache-updates))
     result))
 
 (defn get-by-attrval [attribute value conn]
-  (let [cache-hit (get-in @utils/cache [:attr-value (str attribute "#" value)]) 
+  (let [cache-hit (get-in @utils/cache [:attr-value (str attribute "#" value)])
         result (if (nil? cache-hit)
                  (utils/fetch-by-attribute-value (:dynamo conn) (:table-name conn) attribute value)
-                 cache-hit)] 
+                 cache-hit)]
     (swap! utils/cache #(assoc-in % [:attr-value (str attribute "#" value)] result))
     result))
  
-(defn lookup [bind-to attribute ents conn] ;; items can be a map or a set or nil
-  (let [ents-set (if (map? ents)
-                   (set (mapcat identity (vals ents)))
-                   ents)
+(defn lookup [bind-to attribute ents conn] ;; items can be a map or a set or nil 
+  (let [ents-set (cond 
+                   (map? ents) (set (mapcat identity (vals ents)))
+                   (set? ents) ents
+                   (nil? ents) nil
+                   :else #{ents}) ;; ents is a scalar
         result (if ents-set
                  (apply concat (pmap #(get-by-entity-id-attribute attribute % conn) ents-set))
                  (get-by-attribute attribute conn))
         parsed (reduce (fn [acc item] 
                            (update acc {bind-to (:entity-id item)} (fnil conj #{}) (:value item))) {} result)]
-    parsed)) 
+    parsed))
 
 (defn lookup-eids [attribute values conn] 
   (let [result (if (nil? values)
@@ -159,16 +169,16 @@
 (defn to-fn [call]
   (let [replace-symbols (fn replace-symbols [expr in] 
                           (let [resolved (cond
-                            (list? expr)  ;; If it's a nested function call, process recursively
-                            (let [fn (resolve (first expr)) 
-                                  args (mapv #(replace-symbols % in) (rest expr))
-                                  apply-result (apply fn args)]
-                              apply-result)
-                            (and (symbol? expr) (resolve expr)) expr  ;; Global function, keep it
-                            (and (symbol? expr) (not (contains? in expr))) (throw (ex-info "Variable not found" {:var expr}))
-                            (symbol? expr) (get in expr)  ;; Replace query var with actual value
-                            :else expr)]
-                            resolved))];; Keep literals unchanged
+                                           (list? expr)  ;; If it's a nested function call, process recursively
+                                           (let [fn (resolve (first expr)) 
+                                                 args (mapv #(replace-symbols % in) (rest expr))
+                                                 apply-result (apply fn args)] 
+                                             apply-result)
+                                           (and (symbol? expr) (resolve expr)) expr  ;; Global function, keep it
+                                           (and (symbol? expr) (not (contains? in expr))) (throw (ex-info "Variable not found" {:var expr}))
+                                           (symbol? expr) (get in expr)  ;; Replace query var with actual value
+                                           :else expr)]
+                            resolved))];; Keep literals unchanged 
     (fn [in]
       (replace-symbols call in))))
 
@@ -183,9 +193,8 @@
   (fn [bindings]
     (apply-fn (to-fn call) bindings (get-fn-deps call))))
 
-(defn build-resolvers [conn in where]
-  (let [clauses (replace-all-variables in where)
-        resolvers (reduce (fn [acc clause]
+(defn build-resolvers [conn where]
+  (let [resolvers (reduce (fn [acc clause]
                             (cond
                               (= (count clause) 3)
                               (let [[constrained attribute bound] clause]
@@ -197,7 +206,7 @@
                                     assoced (assoc acc bound (new-fn-binding call))]
                                 assoced)
                               (= (count clause) 1)
-                              acc)) {} clauses)]
+                              acc)) {} where)]
     resolvers))
 
 ;; At this point, we will have ONE set of homogenous named tuples 
@@ -208,6 +217,21 @@
           tuples
           predicates))
 
+(defn uuid-str? [s]
+  (if (not (string? s))
+    false
+    (boolean (re-matches #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" s))))
+
+
+(defn replace-idents [named-tuples]
+  (let [eid-to-ident (into {} (map (fn [[k v]] [v k]) @schema/ident-cache))]
+    (mapv (fn [tuple] (reduce-kv (fn [new-tup k v]
+                                   (if (uuid-str? v)
+                                   (if (contains? eid-to-ident v)
+                                       (assoc new-tup k (get eid-to-ident v))
+                                       (assoc new-tup k v))
+                                     (assoc new-tup k v))) {} tuple)) named-tuples)))
+
 (defn into-vectors 
   ([conn result-bindings var-order]
    (into-vectors conn result-bindings var-order []))
@@ -215,11 +239,16 @@
    (let [sets (mapv (fn [[k v]] (to-named-tuples k v)) result-bindings) ;; vector of sets of named tuples
          unified (join-no-extra-cartesians sets)
          filtered (apply-predicates unified predicates)
-         result (vec (doall (pmap #(reduce (fn [acc var] 
+         with-idents (replace-idents filtered)
+         result (if (= (last var-order) '.)
+                  (if (and (= (count var-order) 2) (symbol? (first var-order)))
+                    (get (first with-idents) (first var-order))
+                    (throw (ex-info "Invalid usage of . syntax" {:find var-order})))
+                  (vec (doall (pmap #(reduce (fn [acc var]
                                              (cond 
                                                (symbol? var) (conj acc (get % var))
                                                (and (coll? var) (= (first var) 'pull)) 
-                                               (conj acc (p/pull conn (last var) (get % (second var)))))) [] var-order) filtered)))]
+                                               (conj acc (p/pull conn (last var) (get % (second var)))))) [] var-order) with-idents))))]
      result)))
 
 (defn build-dependency-graph [clauses]
@@ -259,19 +288,39 @@
   (let [clause-deps (build-dependency-graph clauses)]
     (topo-sort clause-deps)))
 
+(defn handle-vec [var-vec input-vec]
+  (if (coll? input-vec)
+    (cond (= (last var-vec) '...) (assoc
+                                   (zipmap (drop-last 2 var-vec) (take (- (count var-vec) 2) input-vec))
+                                   (last (butlast var-vec)) (set (drop (- (count var-vec) 2) input-vec)))
+          (= (count var-vec) (count input-vec)) (zipmap var-vec input-vec)
+          :else nil)
+    nil))
+
+(defn build-input-map [in inputs]
+  (if in 
+    (reduce-kv (fn [new-map k v]
+                 (if (vector? k) 
+                   (let [unpacked-vec (handle-vec k v)]
+                     (if (nil? unpacked-vec)
+                       (throw (ex-info (str "Vectors don't match: " k " " (vec v)) {}))
+                       (merge new-map unpacked-vec)))
+                   (assoc new-map k v))) {} (zipmap in inputs))
+    nil))
+
 (defn q [body & inputs]
   (let [parsed (parse-query body)
-        input-map (if (:in parsed)
-                    (zipmap (:in parsed) inputs)
-                    nil)
+        in (:in parsed)
+        input-map (build-input-map in inputs)
         conn (if (nil? input-map)
                (first inputs)
-               ('$ input-map))
-        resolvers (build-resolvers conn input-map (:where parsed))
-        fn-clauses (filter (fn [clause] (= (count clause) 2)) (:where parsed))
+               ('$ input-map)) 
+        where (replace-all-variables input-map (:where parsed))
+        resolvers (build-resolvers conn where)
+        fn-clauses (filter (fn [clause] (= (count clause) 2)) where)
         sorted-fn-clause (sort-fn-clauses fn-clauses) 
-        attribute-clauses (filter (fn [clause] (= (count clause) 3)) (:where parsed))
-        predicate-clauses (filter (fn [clause] (= (count clause) 1)) (:where parsed))
+        attribute-clauses (filter (fn [clause] (= (count clause) 3)) where)
+        predicate-clauses (filter (fn [clause] (= (count clause) 1)) where)
         sorted-attribute-clauses (sort-by (fn [clause] 
                                                (count (filter symbol? clause)))
                                                 attribute-clauses) ;; predicate clauses after fn clauses
@@ -280,5 +329,5 @@
                               (if (and (symbol? word) (not (contains? (set acc) word)))
                                 (conj acc word)
                                 acc)) [] (mapcat identity sorted-clauses))
-        resolved (resolve-all {} resolvers sorted-vars)]
+        resolved (resolve-all {} resolvers sorted-vars)] 
     (into-vectors conn resolved (:find parsed) predicate-clauses)))

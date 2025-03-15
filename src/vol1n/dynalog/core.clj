@@ -77,7 +77,8 @@
                                         {:AttributeName "is-schema" :AttributeType "N"}
                                         {:AttributeName "value-as-number" :AttributeType "N"}
                                         {:AttributeName "entity-id-attribute" :AttributeType "S"}
-                                        {:AttributeName "entity-id-attribute-value" :AttributeType "S"}]
+                                        {:AttributeName "entity-id-attribute-value" :AttributeType "S"}
+                                        {:AttributeName "is-ident" :AttributeType "N"}]
                  :GlobalSecondaryIndexes [{:IndexName "latest-index"
                                            :KeySchema [{:AttributeName "entity-id" :KeyType "HASH"}
                                                        {:AttributeName "latest" :KeyType "RANGE"}]
@@ -109,6 +110,9 @@
                                            :Projection {:ProjectionType "ALL"}}
                                           {:IndexName "entity-id-attribute-value-index"
                                            :KeySchema [{:AttributeName "entity-id-attribute-value" :KeyType "HASH"}]
+                                           :Projection {:ProjectionType "ALL"}}
+                                          {:IndexName "is-ident-index"
+                                           :KeySchema [{:AttributeName "is-ident" :KeyType "HASH"}]
                                            :Projection {:ProjectionType "ALL"}}]
                  :BillingMode "PAY_PER_REQUEST"}
         response (aws/invoke (:dynamo client)

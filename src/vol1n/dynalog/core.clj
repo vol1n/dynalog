@@ -144,6 +144,7 @@
 (defn connect [client db-name]
   (create-table-if-not-exists! client db-name)
   (schema/update-schema! client db-name)
+  (schema/update-ident-cache! client db-name)
   (assoc client :connected true :table-name db-name))
 
 (defn db [conn]

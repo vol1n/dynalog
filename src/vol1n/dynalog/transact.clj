@@ -32,6 +32,7 @@
     (reduce (fn [acc item]
               (if (not (map? item))
                 {:final (conj (:final acc) item) :assigned (:assigned acc)}
+                
               (let [item-id-fields (filter (fn [k] (contains? item k)) id-fields)
                     no-temp-ids (reduce (fn [item-acc k] 
                                           (cond
@@ -547,7 +548,7 @@
 (defn transact [conn tx]
   (let [tx-id (generate-tx-id)
         deduped (deduplicate-tx-data (:tx-data tx))
-        cleaned (validate-schema-entities conn deduped)]
+        cleaned (validate-schema-entities conn deduped)] 
     (if (nil? cleaned)
       {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " "schema facts are idempotent")}
       (let [{data-with-ids :final assigned :assigned} (assign-ids cleaned)
@@ -556,8 +557,8 @@
         (if (seq invalid-entities)
           {:vol1n.dynalog/error true :vol1n.dynalog.error/message (str "Transaction data is invalid: " (vec invalid-entities))}
           (let [put-result (put-all-facts! tx-id conn facts)]
-            (if (dynalog-error? put-result)
-                put-result
+            (if (dynalog-error? put-result) 
+              put-result
               (do
                 (swap! utils/cache #(reduce (fn [acc fact]
                                               (if (map? fact)
